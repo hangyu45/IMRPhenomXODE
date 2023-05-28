@@ -1,0 +1,11 @@
+jupyter
+numpy
+scipy
+matplotlib
+numba
+icc_rt
+h5py
+python-lal
+python-lalsimulation=5.1.0
+
+
