@@ -333,7 +333,7 @@ def opt_phi_ref_phi_az(ss, psd, kwargs_hh,
         ret = opt.dual_annealing(linfree_phi_ref_phi_az_func, 
                                 ((-np.pi, np.pi), (-np.pi, np.pi)), 
                                 args=(ss, psd, kwargs_hh, kappa_0, f_min, f_max), x0=(0., 0.), 
-                                maxfun=7e4, maxiter=140)
+                                maxfun=1e5, maxiter=250)
         xx = ret.x
     else:
         ret = opt.minimize(linfree_phi_ref_phi_az_func, 

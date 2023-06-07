@@ -1,3 +1,22 @@
+"""
+    Codes to preform numerical integration of precession ODEs. 
+    Copyright (C) 2023,  Hang Yu (hang.yu2@montana.edu)
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
+
 import numpy as np
 import scipy.interpolate as interp
 import scipy.signal as sig
@@ -1847,6 +1866,22 @@ def wrap_ODE_fast_Euler_only(return_ode_pts=False, include_tail=True,
                              use_N4LO_prec=True,
                              fix_PN_coeff=False, 
                              **kwargs):
+    """
+    Wrapper for functions computing Euler angles vs. orbital frequency (including GW tail corrections)
+    Outputs:
+        eul_vs_Mw: Given M*omega, returns alpha, cos(beta/2), sin(beta/2), epsilon
+        th_JN_0: angle between total angular momentum J_0 and line of sight N
+        pol: 2*zeta, see eqs. (c22), (D6), & (D7) of Pratten+ 21, PRD 103, 104056
+        chi1_L_v: chi1 vector at 6M or end of the ODE in a frame aligned with L
+        chi2_L_v: chi2 vector at 6M or end of the ODE in a frame aligned with L
+        
+    Options for the user to choose:
+        return_ode_pts: return points used to evaluate the precession ODE. Default: False
+        include_tail: assuming the user input 2*np.pi*f_gw/|m'|, either treat it as orbital frequency (include_tail=False) or include further corretions due to GW tail (include_tail=True). Default: True
+        use_N4LO_prec: If True, solve N4LO precession equation. Otherwise solve the NLO equations based on which the MSA angles are derived. Default: True
+        fix_PN_coeff: If True, use chi1z and chi2z at f_ref when computing domega/dt. Otherwise update them together with precession. Default: False
+    """
+    
     M1_Ms = kwargs['mass1']
     M2_Ms = kwargs['mass2']
     
@@ -1870,8 +1905,8 @@ def wrap_ODE_fast_Euler_only(return_ode_pts=False, include_tail=True,
     phi_ref = kwargs['phi_ref']
     iota = kwargs['iota']
     
-    atol = kwargs.pop('atol', 3e-5)
-    rtol = kwargs.pop('rtol', 3e-5)
+    atol = kwargs.pop('atol', 2e-4)
+    rtol = kwargs.pop('rtol', 2e-4)
     max_abs_m = kwargs.pop('max_abs_m', 4)
     
     if max_abs_m <2:
@@ -1925,6 +1960,10 @@ def wrap_ODE_fast_Euler_only(return_ode_pts=False, include_tail=True,
     
     # isco
     f_isco = np.sqrt(GMt/(6.*r_Mt)**3.)/np.pi
+    
+    # to make sure that at least we have an inspiral part
+    if f_lower> (0.8*f_isco):
+        f_lower = 0.8*f_isco
     
     # max freq to integrate the ode
     omega_max = np.pi * f_isco
@@ -2134,174 +2173,184 @@ def wrap_ODE_fast_Euler_only(return_ode_pts=False, include_tail=True,
     
     if ((f_ref>f_isco) and (dMw_dt_M_ref < (1e-6*eta))) or (3.16*f_ref >= omega_max):
         dMw_dt_M_ref = 1e-6*eta
-        forward_flag=False        
+        forward_flag=False                
     
     #######
     # ODE #
     #######
+    
+    resolution_flag=False
+    n_iter = 0
+    
+    while (not resolution_flag) and (n_iter<3):
         
-    # function to do the integration
-    if use_N4LO_prec:
-#         print('use N4LO precession')
-        if fix_PN_coeff:
-#             print('fixing PN coefficients')
-            int_func = lambda Mw_, y_nat_vect_: \
-                evol_binary_circ_fast_N4LO_fix_PN_coeff(
-                        Mw_, y_nat_vect_, par, par_simp_p, aa_ref, bb_ref,
-                        al_offset=al_offset)
-        else:
-#             print('updating PN coefficients')
-            int_func = lambda Mw_, y_nat_vect_: \
-                evol_binary_circ_fast_N4LO(Mw_, y_nat_vect_, par, par_simp_p, al_offset=al_offset)
-    else:
-#         print('use NLO precession')
-        if fix_PN_coeff:
-#             print('fixing PN coefficients')
-            int_func = lambda Mw_, y_nat_vect_: \
-                evol_binary_circ_fast_fix_PN_coeff(
-                        Mw_, y_nat_vect_, par, par_simp_p, aa_ref, bb_ref, 
-                        al_offset=al_offset)
-        else:
-#             print('updating PN coefficients')
-            int_func = lambda Mw_, y_nat_vect_: \
-                evol_binary_circ_fast(Mw_, y_nat_vect_, par, par_simp_p, al_offset=al_offset)
-    
-    def event_6M(Mw_, y_nat_vect_):
-        resi = Mw_ - 0.06804138
-        return resi
-    
-    event_6M.direction = 1
-    event_6M.terminal = False
-    
-    if fix_PN_coeff:
-        def event_dMw_zero(Mw_, y_nat_vect_):
-            if Mw_<0.04:
-                resi = 1.
+        # function to do the integration
+        if use_N4LO_prec:
+            if fix_PN_coeff:
+                int_func = lambda Mw_, y_nat_vect_: \
+                    evol_binary_circ_fast_N4LO_fix_PN_coeff(
+                            Mw_, y_nat_vect_, par, par_simp_p, aa_ref, bb_ref,
+                            al_offset=al_offset)
             else:
-                # scalar quantities that will be useful for the other parts
-                M_omega_1_3 = Mw_**(0.333333333)
-                M_omega_2_3 = M_omega_1_3 * M_omega_1_3
-                M_omega_4_3 = M_omega_2_3 * M_omega_2_3
-                M_omega_5_3 = M_omega_4_3 * M_omega_1_3
-                M_omega_6_3 = M_omega_5_3 * M_omega_1_3
-                M_omega_7_3 = M_omega_6_3 * M_omega_1_3
-                M_omega_8_3 = M_omega_7_3 * M_omega_1_3
-                M_omega_9_3 = M_omega_8_3 * M_omega_1_3
-                
-                M_omega_pows = np.array([M_omega_1_3, M_omega_2_3, Mw_, 
-                                         M_omega_4_3, M_omega_5_3, M_omega_6_3, 
-                                         M_omega_7_3, M_omega_8_3, M_omega_9_3])            
-
-                dMw_dt_M = get_dMw_dt_M(M_omega_pows, aa_ref, bb_ref)
-                
-                resi = (dMw_dt_M - 0.8 * dMw_dt_M_ref) * 1e6
-            return resi
-    else:
-        def event_dMw_zero(Mw_, y_nat_vect_):
-            if Mw_<0.04:
-                resi = 1.
+                int_func = lambda Mw_, y_nat_vect_: \
+                    evol_binary_circ_fast_N4LO(Mw_, y_nat_vect_, par, par_simp_p, al_offset=al_offset)
+        else:
+            if fix_PN_coeff:
+                int_func = lambda Mw_, y_nat_vect_: \
+                    evol_binary_circ_fast_fix_PN_coeff(
+                            Mw_, y_nat_vect_, par, par_simp_p, aa_ref, bb_ref, 
+                            al_offset=al_offset)
             else:
-                uL_v = y_nat_vect_[0:3]
-                uS1_v = y_nat_vect_[3:6]
-                uS2_v = y_nat_vect_[6:9]
+                int_func = lambda Mw_, y_nat_vect_: \
+                    evol_binary_circ_fast(Mw_, y_nat_vect_, par, par_simp_p, al_offset=al_offset)
         
-                # scalar quantities that will be useful for the other parts
-                M_omega_1_3 = Mw_**(0.333333333)
-                M_omega_2_3 = M_omega_1_3 * M_omega_1_3
-                M_omega_4_3 = M_omega_2_3 * M_omega_2_3
-                M_omega_5_3 = M_omega_4_3 * M_omega_1_3
-                M_omega_6_3 = M_omega_5_3 * M_omega_1_3
-                M_omega_7_3 = M_omega_6_3 * M_omega_1_3
-                M_omega_8_3 = M_omega_7_3 * M_omega_1_3
-                M_omega_9_3 = M_omega_8_3 * M_omega_1_3
-                
-                M_omega_pows = np.array([M_omega_1_3, M_omega_2_3, Mw_, 
-                                         M_omega_4_3, M_omega_5_3, M_omega_6_3, 
-                                         M_omega_7_3, M_omega_8_3, M_omega_9_3])
-            
-                uL_d_uS1 = inner(uL_v, uS1_v)
-                uL_d_uS2 = inner(uL_v, uS2_v)
-                uS1_d_uS2 = inner(uS1_v, uS2_v)
-            
-                # updating the PN coefficients as uL_d_uS1, etc, may have changed
-                aa, bb = get_PN_coeff(par, uL_d_uS1, uL_d_uS2, uS1_d_uS2)
-                
-                dMw_dt_M = get_dMw_dt_M(M_omega_pows, aa, bb)
-                
-                resi = (dMw_dt_M - 0.8 * dMw_dt_M_ref) * 1e6
+        def event_6M(Mw_, y_nat_vect_):
+            resi = Mw_ - 0.06804138
             return resi
-    
-    event_dMw_zero.direction = -1
-    event_dMw_zero.terminal = True                    
-    
-    # forward integration
-    if forward_flag:
-        sol_f = integ.solve_ivp(int_func, \
-                t_span=(f_ref*t_Mt_pi, omega_max*t_Mt), y0=y_nat_init, rtol=rtol, atol=atol, 
-                        events=[event_6M, event_dMw_zero])
         
-        Mw_f = sol_f.t    
-        y_f = sol_f.y
+        event_6M.direction = 1
+        event_6M.terminal = False
         
-    else:
-        Mw_f, y_f = np.zeros(0), np.zeros((9, 0))
+        if fix_PN_coeff:
+            def event_dMw_zero(Mw_, y_nat_vect_):
+                if Mw_<0.04:
+                    resi = 1.
+                else:
+                    # scalar quantities that will be useful for the other parts
+                    M_omega_1_3 = Mw_**(0.333333333)
+                    M_omega_2_3 = M_omega_1_3 * M_omega_1_3
+                    M_omega_4_3 = M_omega_2_3 * M_omega_2_3
+                    M_omega_5_3 = M_omega_4_3 * M_omega_1_3
+                    M_omega_6_3 = M_omega_5_3 * M_omega_1_3
+                    M_omega_7_3 = M_omega_6_3 * M_omega_1_3
+                    M_omega_8_3 = M_omega_7_3 * M_omega_1_3
+                    M_omega_9_3 = M_omega_8_3 * M_omega_1_3
+                    
+                    M_omega_pows = np.array([M_omega_1_3, M_omega_2_3, Mw_, 
+                                             M_omega_4_3, M_omega_5_3, M_omega_6_3, 
+                                             M_omega_7_3, M_omega_8_3, M_omega_9_3])            
+    
+                    dMw_dt_M = get_dMw_dt_M(M_omega_pows, aa_ref, bb_ref)
+                    
+                    resi = (dMw_dt_M - 0.8 * dMw_dt_M_ref) * 1e6
+                return resi
+        else:
+            def event_dMw_zero(Mw_, y_nat_vect_):
+                if Mw_<0.04:
+                    resi = 1.
+                else:
+                    uL_v = y_nat_vect_[0:3]
+                    uS1_v = y_nat_vect_[3:6]
+                    uS2_v = y_nat_vect_[6:9]
             
-
-    # backward integration
-#     print('sol_b')
-    sol_b = integ.solve_ivp(int_func, \
-            t_span=(f_ref*t_Mt_pi, f_lower*t_Mt_pi), y0=y_nat_init, rtol=2*rtol, atol=2*atol, 
-                    first_step = 0.1*(f_ref-f_lower)*t_Mt_pi)
-    
-    Mw_b = sol_b.t
-    y_b = sol_b.y
-    Mw_b = Mw_b[::-1]
-    y_b = y_b[:, ::-1]
-    n_back = len(Mw_b)    
-    
-    # backward integration part 2
-    # for the |m|>2 harmonic 
-    
-    if (max_abs_m > 2):
-#         print('sol_b2')
-        sol_b2 = integ.solve_ivp(int_func, \
-                t_span=(f_lower*t_Mt_pi, (2./max_abs_m) * f_lower*t_Mt_pi), 
-                        y0=sol_b.y[:, -1], rtol=4*rtol, atol=4*atol, 
-                        first_step = 0.2*(1.-2./max_abs_m)*f_lower*t_Mt_pi)                                        
-    
-        Mw_b2 = sol_b2.t
-        y_b2 = sol_b2.y
-        Mw_b2 = Mw_b2[::-1]
-        y_b2 = y_b2[:, ::-1]
-        n_back2 = len(Mw_b2)
+                    # scalar quantities that will be useful for the other parts
+                    M_omega_1_3 = Mw_**(0.333333333)
+                    M_omega_2_3 = M_omega_1_3 * M_omega_1_3
+                    M_omega_4_3 = M_omega_2_3 * M_omega_2_3
+                    M_omega_5_3 = M_omega_4_3 * M_omega_1_3
+                    M_omega_6_3 = M_omega_5_3 * M_omega_1_3
+                    M_omega_7_3 = M_omega_6_3 * M_omega_1_3
+                    M_omega_8_3 = M_omega_7_3 * M_omega_1_3
+                    M_omega_9_3 = M_omega_8_3 * M_omega_1_3
+                    
+                    M_omega_pows = np.array([M_omega_1_3, M_omega_2_3, Mw_, 
+                                             M_omega_4_3, M_omega_5_3, M_omega_6_3, 
+                                             M_omega_7_3, M_omega_8_3, M_omega_9_3])
+                
+                    uL_d_uS1 = inner(uL_v, uS1_v)
+                    uL_d_uS2 = inner(uL_v, uS2_v)
+                    uS1_d_uS2 = inner(uS1_v, uS2_v)
+                
+                    # updating the PN coefficients as uL_d_uS1, etc, may have changed
+                    aa, bb = get_PN_coeff(par, uL_d_uS1, uL_d_uS2, uS1_d_uS2)
+                    
+                    dMw_dt_M = get_dMw_dt_M(M_omega_pows, aa, bb)
+                    
+                    resi = (dMw_dt_M - 0.8 * dMw_dt_M_ref) * 1e6
+                return resi
         
+        event_dMw_zero.direction = -1
+        event_dMw_zero.terminal = True                    
+        
+        # forward integration
         if forward_flag:
-            M_omega = np.hstack((Mw_b2[0:n_back2-1], Mw_b[0:n_back-1], Mw_f)) 
-            y = np.hstack((y_b2[:, 0:n_back2-1], y_b[:, 0:n_back-1], y_f))        
-            idx_ref = n_back2 + n_back - 2
+            sol_f = integ.solve_ivp(int_func, \
+                    t_span=(f_ref*t_Mt_pi, omega_max*t_Mt), y0=y_nat_init, rtol=rtol, atol=atol, 
+                            events=[event_6M, event_dMw_zero])
+            
+            Mw_f = sol_f.t    
+            y_f = sol_f.y
+            
         else:
-            M_omega = np.hstack((Mw_b2[0:n_back2-1], Mw_b)) 
-            y = np.hstack((y_b2[:, 0:n_back2-1], y_b))        
-            idx_ref = len(M_omega) - 1
-        
-    else:               
-        if forward_flag:
-            M_omega = np.hstack((Mw_b[0:n_back-1], Mw_f)) 
-            y = np.hstack((y_b[:, 0:n_back-1], y_f))
-            idx_ref = n_back - 1
-        else:
-            M_omega = Mw_b
-            y = y_b
-            idx_ref = len(M_omega)-1
+            Mw_f, y_f = np.zeros(0), np.zeros((9, 0))
+                
     
-    if idx_ref<0:
-        idx_ref = 0
+        # backward integration
+    #     print('sol_b')
+        sol_b = integ.solve_ivp(int_func, \
+                t_span=(f_ref*t_Mt_pi, f_lower*t_Mt_pi), y0=y_nat_init, rtol=2*rtol, atol=2*atol, 
+                        first_step = 0.1*(f_ref-f_lower)*t_Mt_pi)
         
+        Mw_b = sol_b.t
+        y_b = sol_b.y
+        Mw_b = Mw_b[::-1]
+        y_b = y_b[:, ::-1]
+        n_back = len(Mw_b)    
+        
+        # backward integration part 2
+        # for the |m|>2 harmonic 
+        
+        if (max_abs_m > 2):
+    #         print('sol_b2')
+            sol_b2 = integ.solve_ivp(int_func, \
+                    t_span=(f_lower*t_Mt_pi, (2./max_abs_m) * f_lower*t_Mt_pi), 
+                            y0=sol_b.y[:, -1], rtol=4*rtol, atol=4*atol, 
+                            first_step = 0.2*(1.-2./max_abs_m)*f_lower*t_Mt_pi)                                        
+        
+            Mw_b2 = sol_b2.t
+            y_b2 = sol_b2.y
+            Mw_b2 = Mw_b2[::-1]
+            y_b2 = y_b2[:, ::-1]
+            n_back2 = len(Mw_b2)
+            
+            if forward_flag:
+                M_omega = np.hstack((Mw_b2[0:n_back2-1], Mw_b[0:n_back-1], Mw_f)) 
+                y = np.hstack((y_b2[:, 0:n_back2-1], y_b[:, 0:n_back-1], y_f))        
+                idx_ref = n_back2 + n_back - 2
+            else:
+                M_omega = np.hstack((Mw_b2[0:n_back2-1], Mw_b)) 
+                y = np.hstack((y_b2[:, 0:n_back2-1], y_b))        
+                idx_ref = len(M_omega) - 1
+            
+        else:               
+            if forward_flag:
+                M_omega = np.hstack((Mw_b[0:n_back-1], Mw_f)) 
+                y = np.hstack((y_b[:, 0:n_back-1], y_f))
+                idx_ref = n_back - 1
+            else:
+                M_omega = Mw_b
+                y = y_b
+                idx_ref = len(M_omega)-1
+        
+        if idx_ref<0:
+            idx_ref = 0
+            
+            
+        idx = M_omega < (t_Mt * omega_max)
+            
+        # request at least 6 steps in the ODE to enable interpolation
+        if len(M_omega[idx])>5:
+            resolution_flag=True
+            
+        else:
+            # solve the ODE again with a finer resolution
+            atol /= 5
+            rtol /= 5
+            n_iter += 1        
         
     ###########################
     # processing the solution #
-    ###########################
-    
+    ###########################    
     
     uL_r_v = y[0:3, :]
     
@@ -2319,26 +2368,40 @@ def wrap_ODE_fast_Euler_only(return_ode_pts=False, include_tail=True,
     al_offset = 0.
     ep_offset = -(ep_0 + ep_1)[idx_ref] + phi_JL0 - np.pi
     
+    
+    # now select only points within omega_max
+    M_omega = M_omega[idx]
+    y = y[:, idx]
+    al_0 = al_0[idx]
+    al_1 = al_1[idx]
+    c_hb = c_hb[idx]
+    s_hb = s_hb[idx]
+    ep_0 = ep_0[idx]
+    ep_1 = ep_1[idx]        
+    
     # output
     if include_tail:
         # this includes the GW tail contribution to the phase
         # only a small correction, therefore just fix PN coefficients by their initial values
         dMw_dt_M = get_dMw_dt_M_from_M_omega_sequence(M_omega, aa_ref, bb_ref)
+                
         Mw_2_3 = M_omega**0.66666666667
         xx = M_omega \
             - dMw_dt_M * (  (2.-5./3.*eta*Mw_2_3)*np.log(M_omega)\
-                                  + (2.-eta*Mw_2_3) )
+                                  + (2.-eta*Mw_2_3) )        
     else:
         xx = M_omega 
-    
-#     al_vs_Mw_tck = interp.splrep(xx, al_0+al_1 +al_offset)
-
-
-#     al_vs_Mw_tck = interp.splrep(xx, al_0+al_1)    
-    al_vs_Mw_tck = interp.splrep(xx, al_0+al_1+al_offset)
-    c_hb_vs_Mw_tck = interp.splrep(xx, c_hb)
-    s_hb_vs_Mw_tck = interp.splrep(xx, s_hb)
-    ep_vs_Mw_tck = interp.splrep(xx, ep_0+ep_1 + ep_offset)
+        
+    if len(xx)<=3:
+        al_vs_Mw_tck = interp.splrep(xx, al_0+al_1+al_offset, k=1)
+        c_hb_vs_Mw_tck = interp.splrep(xx, c_hb, k=1)
+        s_hb_vs_Mw_tck = interp.splrep(xx, s_hb, k=1)
+        ep_vs_Mw_tck = interp.splrep(xx, ep_0+ep_1 + ep_offset, k=1)
+    else:
+        al_vs_Mw_tck = interp.splrep(xx, al_0+al_1+al_offset, k=3)
+        c_hb_vs_Mw_tck = interp.splrep(xx, c_hb, k=3)
+        s_hb_vs_Mw_tck = interp.splrep(xx, s_hb, k=3)
+        ep_vs_Mw_tck = interp.splrep(xx, ep_0+ep_1 + ep_offset, k=3)
     
     def eul_vs_Mw(_Mw):
         _Mw = np.asarray(_Mw)
@@ -2380,5 +2443,3 @@ def wrap_ODE_fast_Euler_only(return_ode_pts=False, include_tail=True,
     else:
         return eul_vs_Mw, th_JN_0, pol, \
                chi1_L_v, chi2_L_v
-
-

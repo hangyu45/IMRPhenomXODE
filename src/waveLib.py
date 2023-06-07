@@ -1,3 +1,22 @@
+"""
+    Codes to generate the XODE waveform.  
+    Copyright (C) 2023,  Hang Yu (hang.yu2@montana.edu)
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
+
 import numpy as np
 import scipy.interpolate as interp
 import scipy.signal as sig
@@ -23,6 +42,34 @@ def get_hp_hc_f_sequence(approximant,
                          ll_list_neg=np.array([ 2,  2,  3,  3,  4]), 
                          mm_list_neg=np.array([-2, -1, -3, -2, -4]), 
                          **kwargs):    
+    """
+    Wrapper function to produce hp(f) and hc(f). 
+    Inputs:
+        approximant: XODE or XPHM. Decides which approximant to call. 
+        freqs: frequency grid in [Hz] on which the waveform is computed. It can have arbitrary spacing but every element needs to be positive
+        ll_list_neg: l quantum numbers of the coprecessing modes. It needs to have the same size as mm_list_neg
+        mm_list_neg: m quantum numbers of the coprecessing modes. Only negative m's have support for positive frequencies. 
+        mass1: Mass of the heavier BH in [solar mass]
+        mass2: Mass of the lighter BH in [solar mass]
+        spin1x: x component of BH1's dimensionless spin 
+        spin1y: y component of BH1's dimensionless spin
+        spin1z: z component of BH1's dimensionless spin (aligned with LN)
+        spin2x: x component of BH2's dimensionless spin 
+        spin2y: y component of BH2's dimensionless spin
+        spin2z: z component of BH2's dimensionless spin (aligned with LN)
+        distance: distance measured in [Mpc]
+        iota: inclination (angle between LN and N)
+        phi_ref: reference phase so that Nx = \sin \iota * \cos (\pi/2 - \phi_ref) in the L_0 phase. 
+        f_ref: reference GW frequency in [Hz]. For meaningful result, it should be smaller than the ISCO frequency (though the code may still run if a higher f_ref is given). 
+        atol: atol to be passed to the ODE solver. 
+        rtol: rtol to be passed to the ODE solver. 
+        use_N4LO_prec: if True, use N4LO precession equations following Akcay+ 2021, PRD 103, 024014. If False, use NLO equations to be consistent with the MSA construction. Default to True
+        fix_PN_coeff: if True, use spin1z and spin2z defined at f_ref to compute d\omega/dt in the precession. Otherwise, updating spin1z and spin2z together with the precession equations. Default to False. 
+        aux_par: lal.CreateDict() if approximant = 'XODE'. If approximant = 'XPHM', use it to pass none-default XPHM options.   
+        
+    Outputs:
+        hp(f) and hc(f). The conventions should follow the default of XPHM. 
+    """
     M1_Ms = kwargs['mass1']
     M2_Ms = kwargs['mass2']
     chi1x = kwargs['spin1x']
@@ -31,6 +78,15 @@ def get_hp_hc_f_sequence(approximant,
     chi2x = kwargs['spin2x']
     chi2y = kwargs['spin2y']
     chi2z = kwargs['spin2z']
+    
+    if M1_Ms < M2_Ms:
+        M1_Ms, M2_Ms = M2_Ms, M1_Ms
+        chi1x, chi1y, chi1z, chi2x, chi2y, chi2z = \
+        chi2x, chi2y, chi2z, chi1x, chi1y, chi1z
+        
+        kwargs['mass1'], kwargs['mass2'] = M1_Ms, M2_Ms
+        kwargs['spin1x'], kwargs['spin1y'], kwargs['spin1z'] = chi1x, chi1y, chi1z
+        kwargs['spin2x'], kwargs['spin2y'], kwargs['spin2z'] = chi2x, chi2y, chi2z 
     
     qq = M2_Ms/M1_Ms
     chi1p = np.sqrt(chi1x**2. + chi1y**2.)
@@ -127,6 +183,10 @@ def get_hp_hc_f_low_max(approximant,
                         ll_list_neg=np.array([ 2,  2,  3,  3,  4]), 
                          mm_list_neg=np.array([-2, -1, -3, -2, -4]), 
                          **kwargs):
+    """
+    similar to get_hp_hc_f_sequence but now computes hp and hc on a frequency grid defined
+    between [f_lower, f_max] with a uniform spacing of delta_f
+    """
     f_lower = kwargs['f_lower']
     f_max = kwargs['f_max']
     delta_f = kwargs['delta_f']
