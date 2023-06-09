@@ -63,9 +63,14 @@ def get_hp_hc_f_sequence(approximant,
         f_ref: reference GW frequency in [Hz]. For meaningful result, it should be smaller than the ISCO frequency (though the code may still run if a higher f_ref is given). 
         atol: atol to be passed to the ODE solver. 
         rtol: rtol to be passed to the ODE solver. 
-        use_N4LO_prec: if True, use N4LO precession equations following Akcay+ 2021, PRD 103, 024014. If False, use NLO equations to be consistent with the MSA construction. Default to True
-        fix_PN_coeff: if True, use spin1z and spin2z defined at f_ref to compute d\omega/dt in the precession. Otherwise, updating spin1z and spin2z together with the precession equations. Default to False. 
-        aux_par: lal.CreateDict() if approximant = 'XODE'. If approximant = 'XPHM', use it to pass none-default XPHM options.   
+        aux_par: lal.CreateDict() if approximant = 'XODE'. If approximant = 'XPHM', use it to pass none-default XPHM options.
+        
+    There are also a few options for the users to turn on/off:
+        SEOB_22_cal: [default True] if True, recalibrate the co-precessing 22 mode's phase to match SEOBNRv4PHM
+        SEOB_HM_cal: [default True] if True, recalibrate the co-precessing 21 & 33 modes' phase to match SEOBNRv4PHM
+        use_N4LO_prec: [default True] if True, use N4LO precession equations following Akcay+ 2021, PRD 103, 024014. If False, use NLO equations to be consistent with the MSA construction.
+        fix_PN_coeff: [default False] if True, use spin1z and spin2z defined at f_ref to compute d\omega/dt in the precession. Otherwise, updating spin1z and spin2z together with the precession equations. Default to False. 
+           
         
     Outputs:
         hp(f) and hc(f). The conventions should follow the default of XPHM. 
