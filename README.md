@@ -10,7 +10,7 @@ The code is described in https://arxiv.org/abs/2306.08774, which can also be acc
 
 ## Installation
 ```bash
-git clone git@github.com:hangyu45/IMRphenomXODE.git
+git clone git@github.com:hangyu45/IMRPhenomXODE.git
 conda create --name <environment_name> --file requirements.txt --channel conda-forge
 ```
 (replace `<environment_name>` by a name of your choice).
