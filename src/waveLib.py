@@ -204,8 +204,48 @@ def get_hp_hc_f_low_max(approximant,
     return hp, hc
 
 
+def get_h_lm_inertial_f_sequence_XODE(
+        ll_list_neg=np.array([ 2,  2,  3,  3,  4]), 
+        mm_list_neg=np.array([-2, -1, -3, -2, -4]), 
+        **kwargs):
+    """
+    Wrapper function to produce h_lm(f) in the inertial frame. 
+    
+    The inputs are the same as those used in get_hp_hc_f_sequence(). Please see the instruction therein. 
+    Note: the l & m input via ll_list_neg & mm_list_neg are modes in the COPRECESSING frame!
+    
+    Outputs: 
+        h_lm: modes in the INERTIAL frame. Shape: (n_lm, n_freq),
+              where n_lm = 5 * l2_flag + 7 * l3_flag + 9 * l4_flag,
+              with l2_flag = 1 if 2 in ll_list_neg, 0 otherwise, and similarly for other flags
+        lm_list: (l, m) for each mode in h_lm. Its shape is (n_lm, 2). 
+    """
+    M1_Ms = kwargs['mass1']
+    M2_Ms = kwargs['mass2']
+    chi1x = kwargs['spin1x']
+    chi1y = kwargs['spin1y']
+    chi1z = kwargs['spin1z']
+    chi2x = kwargs['spin2x']
+    chi2y = kwargs['spin2y']
+    chi2z = kwargs['spin2z']
+    
+    if M1_Ms < M2_Ms:
+        M1_Ms, M2_Ms = M2_Ms, M1_Ms
+        chi1x, chi1y, chi1z, chi2x, chi2y, chi2z = \
+        chi2x, chi2y, chi2z, chi1x, chi1y, chi1z
+        
+        kwargs['mass1'], kwargs['mass2'] = M1_Ms, M2_Ms
+        kwargs['spin1x'], kwargs['spin1y'], kwargs['spin1z'] = chi1x, chi1y, chi1z
+        kwargs['spin2x'], kwargs['spin2y'], kwargs['spin2z'] = chi2x, chi2y, chi2z 
+    
+    h_lm, lm_list = get_h_lm_inertial_f_sequence_internal(
+            ll_list_neg, mm_list_neg, 
+            **kwargs)
+    return h_lm, lm_list
+
+
 ################################################
-# wrappers to be generate LAL style waveforms #
+# wrappers to generate LAL style waveforms     #
 ################################################
 
 def get_hp_hc_f_dmn_XPHM_f_sequence(ll_list_neg=np.array([ 2,  2,  3,  3,  4]), 
@@ -444,6 +484,236 @@ def get_hp_hc_f_dmn_XPHM_f_sequence(ll_list_neg=np.array([ 2,  2,  3,  3,  4]),
     return hp, hc
 
 
+def get_h_lm_inertial_f_sequence_internal(ll_list_neg=np.array([ 2,  2,  3,  3,  4]), 
+                                    mm_list_neg=np.array([-2, -1, -3, -2, -4]), 
+                                    update_spin = False, 
+                                    use_N4LO_prec = True,
+                                    fix_PN_coeff = False,
+                                    SEOB_22_cal = True,
+                                    SEOB_HM_cal = True, 
+                                    **kwargs):
+    M1_Ms = kwargs['mass1']
+    M2_Ms = kwargs['mass2']
+    chi1x = kwargs['spin1x']
+    chi1y = kwargs['spin1y']
+    chi1z = kwargs['spin1z']
+    chi2x = kwargs['spin2x']
+    chi2y = kwargs['spin2y']
+    chi2z = kwargs['spin2z']
+    dist_Mpc = kwargs['distance']
+    iota = kwargs['iota']
+    f_ref = kwargs['f_ref']
+    phi_ref = kwargs['phi_ref']
+    freq_0 = kwargs['freqs']
+    delta_f = freq_0[1]-freq_0[0]
+    
+    f_lower = freq_0[0]
+    kwargs['f_lower'] = f_lower
+    
+    aux_par = kwargs.pop('aux_par', None)
+    Mf_cut = kwargs.pop('Mf_cut', 1.0)
+    
+    if aux_par is None:
+        aux_par = lal.CreateDict()        
+    
+    dist = dist_Mpc * 1e6 * pc
+    
+    n_pt_0 = len(freq_0)
+    n_mode_h = len(mm_list_neg)
+    n_mode = n_mode_h * 2
+    
+    max_abs_m = int(np.max(np.abs(mm_list_neg)))
+    min_abs_m = int(np.min(np.abs(mm_list_neg)))
+    
+    ll_list=np.hstack((ll_list_neg, ll_list_neg))
+    mm_list=np.hstack((mm_list_neg, -mm_list_neg))
+    
+    # physical system
+    M1 = M1_Ms * Ms
+    M2 = M2_Ms * Ms
+    qq = M2/M1
+    Mt = M1 + M2
+    mu = M1 * M2 / Mt
+    eta = mu / Mt
+    eta2 = eta * eta
+    delta = (M1-M2)/Mt
+    
+    chi1p = np.sqrt(chi1x**2. + chi1y**2.)
+    chi2p = np.sqrt(chi2x**2. + chi2y**2.)
+    
+    chi1 = np.sqrt(chi1p**2 + chi1z**2)
+    chi2 = np.sqrt(chi2p**2 + chi2z**2)                
+    
+    chieff = (M1 * chi1z + M2 * chi2z)/Mt
+    chip = 1./(2.+1.5*qq) \
+        * np.max(((2.+1.5*qq) * chi1p, (2.+1.5/qq) * chi2p * qq * qq))
+    
+    r_Mt = G*Mt/c**2.
+    t_Mt = r_Mt/c
+    # approximate isco by 6M
+    f_isco = 0.02165 / t_Mt       
+    
+    # first get euler angles from ODE    
+    all_finite=False
+    while not all_finite:
+        eul_vs_Mw, th_JN_0, pol, \
+        chi1_L_v, chi2_L_v\
+            = pLib.wrap_ODE_fast_Euler_only(return_ode_pts=False, 
+                                        include_tail=True, 
+                                        use_N4LO_prec = use_N4LO_prec, 
+                                        fix_PN_coeff = fix_PN_coeff,
+                                        max_abs_m = max_abs_m, 
+                                        **kwargs)
+        Mw_test = np.pi*np.array([freq_0[0], f_isco]) * t_Mt
+        _al, _c_hb, _s_hb, _ep = eul_vs_Mw(Mw_test)
+        if np.isfinite(_al).all() and np.isfinite(_c_hb).all() and np.isfinite(_ep).all():
+            all_finite = True
+        else:
+            kwargs['atol']*=0.3
+            kwargs['rtol']*=0.3
+            
+    
+    # updating chip to value at 6M
+    chi12 = pLib.inner(chi1_L_v, chi2_L_v)    
+    chi1p = np.sqrt(chi1_L_v[0]**2. + chi1_L_v[1]**2.)
+    chi2p = np.sqrt(chi2_L_v[0]**2. + chi2_L_v[1]**2.)
+    chip = 1./(2.+1.5*qq) \
+        * np.max(((2.+1.5*qq) * chi1p, (2.+1.5/qq) * chi2p * qq * qq))
+        
+    
+#     only generate waveform at f<f_cut
+    f_cut = Mf_cut / t_Mt               
+    idx = freq_0 < f_cut
+    freq = freq_0[idx]
+    
+    n_pt = len(freq)
+    n_pt_diff = n_pt_0 - n_pt    
+    
+    
+    # note different mp will reach the same orbital frequency at different freq
+    # thus the euler angles should be a 2D array; 
+    # the first dimension denotes |mp| of the coprecessing modes
+    n_eul = max_abs_m - min_abs_m + 1
+    al = np.zeros((n_eul, n_pt))
+    c_hb = np.zeros((n_eul, n_pt))
+    s_hb = np.zeros((n_eul, n_pt))
+    ep = np.zeros((n_eul, n_pt))
+    
+    _mp = min_abs_m
+    for i in range(n_eul):
+        Mw_w_tail = (2.*np.pi/_mp) * freq * t_Mt
+        _al, _c_hb, _s_hb, _ep = eul_vs_Mw(Mw_w_tail)
+        al[i, :] = _al
+        c_hb[i, :] = _c_hb
+        s_hb[i, :] = _s_hb
+        ep[i, :] = _ep
+        _mp += 1
+    
+    # get a list of co-precessing modes from lal
+    h_lmp = np.zeros((n_mode_h, n_pt), dtype=np.complex64)
+    
+    mode_array = lals.SimInspiralCreateModeArray()
+    for i in range(n_mode):
+        lals.SimInspiralModeArrayActivateMode(mode_array, int(ll_list[i]), int(mm_list[i]))
+    lals.SimInspiralWaveformParamsInsertModeArray(aux_par, mode_array)
+    
+    # this asks for the co-precessing modes
+    lals.SimInspiralWaveformParamsInsertPhenomXPHMPrecModes(aux_par, 1)
+    
+    lal_keys_hh =[
+        'freqs', 'l', 'm',
+        'm1_kg', 'm2_kg',
+        's1x', 's1y', 's1z', 's2x', 's2y', 's2z',
+        'dist', 'iota', 'phi_ref', 'f_ref',
+        'aux_par'
+        ]
+    
+    # note phi_ref = 0 for co-precessing modes
+    # this follows XPHM convention 1
+    # see table IV of the XPHM paper
+    lal_par_dict = {
+            'freqs': lal.CreateREAL8Sequence(n_pt),
+            'l': 2,
+            'm': -2,
+            'm1_kg': M1,
+            'm2_kg': M2,
+            's1x': chi1x, 
+            's1y': chi1y,
+            's1z': chi1z,
+            's2x': chi2x,
+            's2y': chi2y,
+            's2z': chi2z,
+            'dist':dist,
+            'iota':iota,
+            'phi_ref':0,
+            'f_ref':f_ref,
+            'aux_par': aux_par,
+            }
+        
+    lal_par_dict['freqs'].data = freq
+    
+    if update_spin:
+        lal_par_dict['s1x'] = chi1_L_v[0]
+        lal_par_dict['s1y'] = chi1_L_v[1]
+        lal_par_dict['s1z'] = chi1_L_v[2]
+        lal_par_dict['s2x'] = chi2_L_v[0]
+        lal_par_dict['s2y'] = chi2_L_v[1]
+        lal_par_dict['s2z'] = chi2_L_v[2]
+    
+    for i in range(n_mode_h):
+        _ll = ll_list_neg[i]
+        _mm = mm_list_neg[i]
+    
+        lal_par_dict['l'] = int(_ll)
+        lal_par_dict['m'] = int(_mm)               
+    
+        # NOTE: the function changes name & input arguments from lalsimulation v 3.x.x to 5.1.0!!!
+        # currently tuned to be consistent with v 5.1.0. 
+        # check your lal version in case of error!!!
+        _h_pos, __ = lals.SimIMRPhenomXPHMFrequencySequenceOneMode(*[lal_par_dict[key] for key in lal_keys_hh])
+
+        h_lmp[i, :] = _h_pos.data.data
+    
+        if (chip < 1e-9):
+            # phase at f_ref is captured by epsilon in the precessing case
+            # in the non-precessing case, need to add ref phase back
+            h_lmp[i, :] *= np.exp(-1j*_mm*(phi_ref + np.pi/2))
+            
+            
+            # check me further!
+            # seems something wierd in XPHM
+            if iota == np.pi:
+                h_lmp[i, :] *= np.exp(-1j*(_mm + 2.)*(np.pi/2-phi_ref))
+                
+
+    if (SEOB_22_cal or SEOB_HM_cal):  
+        chip2 = chip * chip
+#         chieff2 = chieff * chieff
+                
+        AA = np.array([1, eta, eta2, chieff, eta*chieff, eta2*chieff,
+                       chip, eta*chip, eta2*chip, 
+                       chieff*chip, eta*chieff*chip, 
+                       chip2, eta*chip2, eta2*chip2
+                       ])        
+        h_lmp = coprec_cal(freq, f_ref, t_Mt, 
+                           h_lmp, ll_list_neg, mm_list_neg, AA, 
+                           SEOB_22_cal, SEOB_HM_cal)                       
+        
+    # now do the twisting up
+    h_lm, lm_list = get_h_iner_modes_from_h_prec_f_dmn(al, c_hb, s_hb, ep, h_lmp, 
+                                     ll_list_neg, mm_list_neg)
+    
+    # rotate polarization to be consistent with XPHM
+    h_lm *= np.exp(1j*pol)
+    
+    n_lm = h_lm.shape[0]
+    
+    # put hp, hc to the same length as the original freq
+    h_lm = np.concatenate((h_lm, np.zeros((n_lm, n_pt_diff), dtype=np.complex64)), axis=1)    
+    return h_lm, lm_list
+
+
+
 @njit(fastmath=True, cache=True)
 def coprec_cal(freq, f_ref, t_Mt, 
                hlm, ll_list_neg, mm_list_neg, AA, 
@@ -625,7 +895,68 @@ def get_h_iner_pol_from_h_prec_f_dmn(al, c_hb, s_hb, ep, h_lmp,
         hp += 0.5 * _hh * _A_p
         hc += 0.5j * _hh * _A_c
         
-    return hp, hc             
+    return hp, hc   
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def get_h_iner_modes_from_h_prec_f_dmn(al, c_hb, s_hb, ep, h_lmp, 
+                                     ll_list_neg, mm_list_neg):
+    """
+    euler angles (al, beta, ep) have shapes (n_eul, n_freq)
+    and the first index corresponds to [abs(mp) - min_abs_m]
+    
+    Outputs: 
+        h_lm: modes in the inertial frame with a shape (n_lm, n_freq)
+              where n_lm = 5 * l2_flag + 7 * l3_flag + 9 * l4_flag
+              with l2_flag = 1 if 2 in ll_list_neg, 0 otherwise, and similarly for other flags
+        lm_list: shape (n_lm, 2)
+                 l & m for each h_lm
+    """    
+    n_m_neg, n_pt = h_lmp.shape
+    min_abs_m = int(np.min(np.abs(mm_list_neg)))
+    
+    l_flag = np.zeros(3, dtype=np.int8)
+    n_per_l = np.array([5, 7, 9])
+    if 2 in ll_list_neg:
+        l_flag[0] = 1
+    if 3 in ll_list_neg:
+        l_flag[1] = 1
+    if 4 in ll_list_neg:
+        l_flag[2] = 1
+        
+    n_lm = np.sum(l_flag * n_per_l)
+    h_lm = np.zeros((n_lm, n_pt), dtype=np.complex64)
+    lm_list = np.zeros((n_lm, 2))
+    
+    # looping over co-precessing (lp, mp)
+    for i in range(n_m_neg):
+        _mp = mm_list_neg[i]
+        _lp = ll_list_neg[i]
+
+        _idx_eul = int(np.abs(_mp) - min_abs_m)
+        _al = al[_idx_eul, :]
+        _c_hb = c_hb[_idx_eul, :]
+        _s_hb = s_hb[_idx_eul, :]
+        _ep = ep[_idx_eul, :]
+        
+        _hh_p_exp_ep = h_lmp[i, :] * np.exp(1j*_mp*_ep)
+        
+        # the co-prec mode contributes to inertial modes with same l
+        # find the starting index in h_lm of the relevant modes
+        
+        l_m_2 = int(_lp)-2
+        idx_lm_0 = np.sum( (l_flag * n_per_l)[:l_m_2] )
+        
+        for j in range(-_lp, _lp+1, 1):
+            _mm = j
+            lm_list[idx_lm_0 + j + _lp, :] = np.array([_lp, _mm])
+            
+            _dd_mp = get_Wigner_d_from_cs(_c_hb, _s_hb, _lp, _mm, _mp)
+            _h_lm = np.exp(-1j*_mm*_al) * _dd_mp * _hh_p_exp_ep
+            
+            h_lm[idx_lm_0 + j + _lp, :] += _h_lm
+            
+    return h_lm, lm_list
 
 
 
