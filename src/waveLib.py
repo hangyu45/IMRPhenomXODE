@@ -184,6 +184,83 @@ def get_hp_hc_f_sequence(approximant,
     return hp, hc
 
 
+
+def get_hp_hc_each_prec_mode_f_sequence(
+                         ll_list_neg=np.array([ 2,  2,  3,  3,  4]), 
+                         mm_list_neg=np.array([-2, -1, -3, -2, -4]), 
+                         **kwargs):    
+    """
+    Similar to get_hp_hc_f_sequence()
+    but now return h_pc_each_mode with shape (2, len(mm_list_neg), n_freq)
+    i.e., each coprecessing mode's contribution to the final hp & hc
+    
+    Assumes XODE is used. 
+    """
+    M1_Ms = kwargs['mass1']
+    M2_Ms = kwargs['mass2']
+    chi1x = kwargs['spin1x']
+    chi1y = kwargs['spin1y']
+    chi1z = kwargs['spin1z']
+    chi2x = kwargs['spin2x']
+    chi2y = kwargs['spin2y']
+    chi2z = kwargs['spin2z']
+    
+    if M1_Ms < M2_Ms:
+        M1_Ms, M2_Ms = M2_Ms, M1_Ms
+        chi1x, chi1y, chi1z, chi2x, chi2y, chi2z = \
+        chi2x, chi2y, chi2z, chi1x, chi1y, chi1z
+        
+        kwargs['mass1'], kwargs['mass2'] = M1_Ms, M2_Ms
+        kwargs['spin1x'], kwargs['spin1y'], kwargs['spin1z'] = chi1x, chi1y, chi1z
+        kwargs['spin2x'], kwargs['spin2y'], kwargs['spin2z'] = chi2x, chi2y, chi2z 
+    
+    qq = M2_Ms/M1_Ms
+    chi1p = np.sqrt(chi1x**2. + chi1y**2.)
+    chi2p = np.sqrt(chi2x**2. + chi2y**2.)
+    
+    chip = 1./(2.+1.5*qq) \
+        * np.max(((2.+1.5*qq) * chi1p, (2.+1.5/qq) * chi2p * qq * qq))
+        
+    if chip > 1e-6:
+        h_pc_each_prec_mode = get_hp_hc_f_dmn_XPHM_f_sequence(ll_list_neg, mm_list_neg, 
+                            get_each_prec_mode_contribution = True,
+                            **kwargs)
+        
+    else:
+        h_pc_each_prec_mode = np.zeros( (2, len(mm_list_neg), len(kwargs['freqs'])), dtype=np.complex64)
+        lal_keys_hh =[
+                     'freqs',
+                     'm1_kg', 'm2_kg',
+                     's1z', 's2z',
+                     'dist', 'iota', 'phi_ref', 'f_ref',
+                     'aux_par'
+                     ]
+        lal_par_dict = {
+            'freqs': lal.CreateREAL8Sequence(len(kwargs['freqs'])),
+            'm1_kg': kwargs['mass1']*Ms,
+            'm2_kg': kwargs['mass2']*Ms,
+            's1z': kwargs['spin1z'],
+            's2z': kwargs['spin2z'],
+            'dist':kwargs['distance']*1e6*pc,
+            'iota':kwargs['iota'],
+            'phi_ref':kwargs['phi_ref'],
+            'f_ref':kwargs['f_ref']
+        }
+        lal_par_dict['freqs'].data = kwargs['freqs']
+        
+        for i in range(len(mm_list_neg)):
+            lal_par_dict['aux_par'] = lal.CreateDict()
+            mode_array = lals.SimInspiralCreateModeArray()
+            lals.SimInspiralModeArrayActivateMode(mode_array, int(ll_list_neg[i]), int(mm_list_neg[i]))
+            lals.SimInspiralModeArrayActivateMode(mode_array, int(ll_list_neg[i]), -int(mm_list_neg[i]))
+            lals.SimInspiralWaveformParamsInsertModeArray(lal_par_dict['aux_par'], mode_array)
+            _hp, _hc = lals.SimIMRPhenomXHMFrequencySequence(*[lal_par_dict[key] for key in lal_keys_hh])
+            h_pc_each_prec_mode[0, i, :] = _hp.data.data
+            h_pc_each_prec_mode[1, i, :] = _hc.data.data
+            
+    return h_pc_each_prec_mode
+
+
 def get_hp_hc_f_low_max(approximant, 
                         ll_list_neg=np.array([ 2,  2,  3,  3,  4]), 
                          mm_list_neg=np.array([-2, -1, -3, -2, -4]), 
@@ -255,6 +332,7 @@ def get_hp_hc_f_dmn_XPHM_f_sequence(ll_list_neg=np.array([ 2,  2,  3,  3,  4]),
                                     fix_PN_coeff = False,
                                     SEOB_22_cal = True,
                                     SEOB_HM_cal = True, 
+                                    get_each_prec_mode_contribution = False,
                                     **kwargs):
     M1_Ms = kwargs['mass1']
     M2_Ms = kwargs['mass2']
@@ -464,24 +542,42 @@ def get_hp_hc_f_dmn_XPHM_f_sequence(ll_list_neg=np.array([ 2,  2,  3,  3,  4]),
                            SEOB_22_cal, SEOB_HM_cal)                       
         
 #     print('h_lmp', h_lmp[:, 0])
-    # now do the twisting up
-    hp, hc = get_h_iner_pol_from_h_prec_f_dmn(al, c_hb, s_hb, ep, h_lmp, 
-                                     ll_list_neg, mm_list_neg,
-                                     th_s=th_JN_0, phi_s=0.)
+
+    if not get_each_prec_mode_contribution:
+        # now do the twisting up
+        hp, hc = get_h_iner_pol_from_h_prec_f_dmn(al, c_hb, s_hb, ep, h_lmp, 
+                                         ll_list_neg, mm_list_neg,
+                                         th_s=th_JN_0, phi_s=0.)
+        
+        # rotate polarization to be consistent with XPHM
+        hp, hc = rot_pol(hp, hc, pol)
+        
+        # check me further!
+        # seems something wierd in XPHM
+        if (chip < 1e-9) and (iota == 0):
+            hc *= -1
+        
+        # put hp, hc to the same length as the original freq
+        hp = np.hstack((hp, np.zeros(n_pt_diff, dtype=np.complex64)))
+        hc = np.hstack((hc, np.zeros(n_pt_diff, dtype=np.complex64)))
+        
+        return hp, hc
     
-    # rotate polarization to be consistent with XPHM
-    hp, hc = rot_pol(hp, hc, pol)
-    
-    # check me further!
-    # seems something wierd in XPHM
-    if (chip < 1e-9) and (iota == 0):
-        hc *= -1
-    
-    # put hp, hc to the same length as the original freq
-    hp = np.hstack((hp, np.zeros(n_pt_diff, dtype=np.complex64)))
-    hc = np.hstack((hc, np.zeros(n_pt_diff, dtype=np.complex64)))
-    
-    return hp, hc
+    else:
+        h_pc_each_prec_mode = get_h_iner_pol_from_h_prec_f_dmn_each_mode(al, c_hb, s_hb, ep, h_lmp, 
+                                         ll_list_neg, mm_list_neg,
+                                         th_s=th_JN_0, phi_s=0.)
+        for i in range(n_mode_h):
+            h_pc_each_prec_mode[0, i, :], h_pc_each_prec_mode[1, i, :] \
+                = rot_pol(h_pc_each_prec_mode[0, i, :], h_pc_each_prec_mode[1, i, :], pol) 
+        
+        if (chip < 1e-9) and (iota == 0):
+            h_pc_each_prec_mode[1, :, :] *= -1
+            
+        h_pc_each_prec_mode \
+            = np.concatenate((h_pc_each_prec_mode, np.zeros((2, n_mode_h, n_pt_diff), dtype=np.complex64)), axis=-1)
+        return h_pc_each_prec_mode
+        
 
 
 def get_h_lm_inertial_f_sequence_internal(ll_list_neg=np.array([ 2,  2,  3,  3,  4]), 
@@ -896,6 +992,56 @@ def get_h_iner_pol_from_h_prec_f_dmn(al, c_hb, s_hb, ep, h_lmp,
         hc += 0.5j * _hh * _A_c
         
     return hp, hc   
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def get_h_iner_pol_from_h_prec_f_dmn_each_mode(al, c_hb, s_hb, ep, h_lmp, 
+                                     ll_list_neg, mm_list_neg,
+                                     th_s=0., phi_s=0.):
+    """
+    euler angles (al, beta, ep) have shapes (n_eul, n_freq)
+    and the first index corresponds to [abs(mp) - min_abs_m]
+    """    
+    n_m_neg, n_pt = h_lmp.shape
+    min_abs_m = int(np.min(np.abs(mm_list_neg)))
+    
+    h_pc_each_mode = np.zeros((2, n_m_neg, n_pt), dtype=np.complex64)
+    
+    for i in range(n_m_neg):
+        _mp = mm_list_neg[i]
+        _lp = ll_list_neg[i]
+
+        _idx_eul = int(np.abs(_mp) - min_abs_m)
+        _al = al[_idx_eul, :]
+        _c_hb = c_hb[_idx_eul, :]
+        _s_hb = s_hb[_idx_eul, :]
+        _ep = ep[_idx_eul, :]
+        
+        _hh = h_lmp[i, :] * np.exp(1j*_mp*_ep)
+        
+        _A_p = np.zeros(n_pt, dtype=np.complex64)
+        _A_c = np.zeros(n_pt, dtype=np.complex64)
+        
+        for j in range(-_lp, _lp+1, 1):
+            _mm = j
+            _Y = get_s_Ylm_sn2(th_s, phi_s, _lp, _mm)
+            _dd_mp = get_Wigner_d_from_cs(_c_hb, _s_hb, _lp, _mm, _mp)
+            _dd_n_mp = get_Wigner_d_from_cs(_c_hb, _s_hb, _lp, _mm, -_mp)
+        
+            exp_al_Y = np.exp(-1j*_mm*_al) * _Y
+            
+            A_p_mmp = _dd_mp * exp_al_Y + (-1)**_lp * _dd_n_mp * np.conjugate(exp_al_Y)                 
+            A_c_mmp = _dd_mp * exp_al_Y - (-1)**_lp * _dd_n_mp * np.conjugate(exp_al_Y)
+        
+#             hp += 0.5 * _hh * A_p_mmp
+#             hc += 0.5j * _hh * A_c_mmp
+            _A_p += A_p_mmp
+            _A_c += A_c_mmp
+        
+        h_pc_each_mode[0, i, :] = 0.5 * _hh * _A_p
+        h_pc_each_mode[1, i, :] = 0.5j * _hh * _A_c
+        
+    return h_pc_each_mode   
 
 
 @njit(parallel=True, fastmath=True, cache=True)
